@@ -1,0 +1,71 @@
+---
+title: "THE ICONIC Tech Evaluation - SQL Response"
+author: "Alok Sharma, FRM"
+date: "27 February 2019"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE,message=FALSE,warning=FALSE)
+library(sqldf)
+library(rjson)
+options(scipen = 999)  #avoid exponential form numeric outputs
+```
+
+The data was opened in SQLite Browser for read/save purposes to local hard drive. It was saved as a csv- all operations below are using SQLDF library in R for computation.
+**The errors in the data are disregarded for these queries.**
+
+```{r}
+Csv_data <- read.csv("C:/Users/bahri/Downloads/test_data.db/customers.csv", header=T)
+str(Csv_data)
+```
+
+## Q1
+```{r}
+sqldf("SELECT sum(revenue) FROM Csv_data where cc_payments=1")
+```
+
+## Q2
+```{r}
+sqldf(" select (((select cnt where cc_payments=1)/cast(sum(cnt)as real))*100) as perc
+                 from( select cc_payments, 
+                                   count(*) as cnt
+                                   from Csv_data where female_items >0 
+                                   group by cc_payments)
+               ")
+```
+
+## Q3
+
+```{r}
+sqldf("select avg(revenue) 
+      from Csv_data where ios_orders > 0 OR android_orders>0 OR desktop_orders>0
+      ")
+```
+
+## Q4
+
+Since this related to a men's luxury brand, the core focus will be to restrict it to customers with prior purchase history of male items(looking for engaged customers).
+In addition to this, since it is a men's luxury brand campaign via email - it is important to ensure we have customer's approval to send him notifications and marketing material. For this reason, we need to put newsletter subscriber flag to Y.
+
+Next, I do some **basic targeting** without using data science methods: 
+I check the median revenue and coupon discount applied for customers who have purchased male items.
+The idea is to select the **best revenue** generating customers (we use the **median** and not the average - so that outliers do not play a part) and also **coupon discounts** to be low. 
+
+For a men's luxury brand may not have coupon discount to begin with and it is important we test the market behavior without offering generous discounts up first. Hence, we are looking for customers who are willing to buy at low discount / full price.
+
+```{r}
+sqldf("select median(revenue) from Csv_data where male_items>0")
+sqldf("select median(coupon_discount_applied) from Csv_data where male_items>0")
+
+```
+
+We use these values hardcoded for now to generate the customer list with key components of revenue contributed and number of male items purchased.
+```{r}
+email <- sqldf("select distinct(customer_id), revenue, male_items 
+                        from Csv_data
+                        where male_items>0 and revenue >350 and is_newsletter_subscriber='Y'and coupon_discount_applied<10
+               order by male_items desc")
+sqldf ("select count(*) from email")
+sqldf("select * from email LIMIT 5")   #sample of the marketing list
+``` 

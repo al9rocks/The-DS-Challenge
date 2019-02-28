@@ -1,0 +1,794 @@
+---
+title: "THE ICONIC - Tech Evaluation Modelling Response <br />"
+author: "Alok Sharma, FRM"
+date: "27 February 2019"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+rm(list=ls())
+library(rjson)
+library(dplyr)
+library(devtools)
+library(tidyverse)
+library(corrplot)
+library(rpart)
+library(ggplot2)
+library(partykit)
+library(randomForest)
+library(caret)
+library(e1071)
+library(GGally)  #for pairwise plots
+library(xgboost)
+library(rmarkdown)
+library(knitr)
+```
+
+THE ICONIC needs to infer the gender of the customer to better tailor its products to meet the ever-fragmenting and evolving tastes of consumers and disruption challenge from online retailers. 
+
+AI presents a perfect opportunity to answer some of these questions. I will take a jab at cleaning the data, making sense of it, understanding who might be a male/female based on purchase trend and then using the best predictors to predict them.
+
+# Executive Summary:
+
+Inferring gender is probably one of the most insightful problems in retail therapy. 
+There is no one-size-fits-all approach, and retailers need to be ready and prepared to meet consumers online or at the door to fulfill their needs in a customized way.
+
+> Some of the overarching trends I have experienced in this submission and would like to dig deeper if they hold well onto larger (more real) datasets: <br />
+- Men are more likely to buy at full price / lower discounts <br />
+- Men usually buy online *lesser* than female counterparts- hence, data might be biased to female orders  overall (this is for now, but as digital adoption increases, we can expect consumer tastes to move rapidly) <br />
+- Price promotions were one of the least important factors for wooing men <br />
+- Women are device agnostic and have logins from different devices (iOS being highly likely) <br />
+- Orders per month usually higher for women vs men <br />
+
+These findings can be suitably integrated into finding the right target audience for several product launches, experimenting with test-and-learn strategies and pursuing a long-term "AI at scale" goal.
+
+# Methodology Deep Dive:
+  >R package with Markdown support has been used for the submission. Libraries have been added in and removed as required. Efficiency of the code with package conflicts and plotting has been kept in mind.
+  
+# *Part 1 Data Cleaning*
+
+## 1(a) Import JSON
+
+```{r}
+Json_data <- fromJSON(file= "C:/Users/bahri/Downloads/test_data/data.json")
+#write.csv(Json_data, file = "C:/Users/bahri/Downloads/test_data/data.csv")
+
+Csv_data <- read.csv("C:/Users/bahri/Downloads/test_data/data.csv", header=T)
+Csv_data <- Csv_data %>% distinct()
+rm(Json_data)
+```
+
+## 1(b) Data Cleaning
+
+#### Logical Checks and Converting to Binary Number Flag (instead of text)
+Newsletter subscriber flag is the only predictor variable (customer_id aside) which is in text form. Making the change to make it numerically feasible at some point.
+
+>Next, the data has a unique problem where days since first order may be lesser than days since last order. This is mathematically impossible and means data is erroneous.
+
+Hence, a large chunk of data is swiped off. We are left with a minor subset to continue analysis.
+
+```{r}
+df1 <- Csv_data[ which(Csv_data$days_since_first_order >=Csv_data$days_since_last_order), ]
+df1 <- df1[order(df1$female_items) , ]
+df1$is_newsletter_subscriber <- ifelse(df1$is_newsletter_subscriber=='N',0,1) #Converting to Binary Number Flag (instead of text)
+```
+
+#### Data Audit - for 'male' labelled response
+For male items, the first check I have done:
+>Max of any of the components for male items i.e. footwear, apparel and sports should not be more than the overall sum (field: male_items). If this is the case, then the data is erroneous. The count of such rows is checked and since it is small, excluded from the analysis base.
+
+Accessories field is not used for now. I will come to it in a bit.
+```{r}
+df_m <- select(df1,c(mftw_items,mapp_items,mspt_items))  
+df_m$max_m <-apply(df_m,1,max)
+df1['max_m']= df_m['max_m']
+df1$male_check <- ifelse(df1$male_items<df1$max_m,1,0)
+aggregate(male_items~male_check,data=df1,FUN=length)
+df2 <- df1[ which(df1$male_check==0), ]
+rm(df_m)
+```
+
+#### Data Audit - for 'female' labelled response
+
+>Same is conducted for female items separately. The erroneous rows are removed.
+
+Accessories field is not used for now. I will come to it in a bit.
+
+```{r}
+df_f <- select(df2,c(wftw_items,wapp_items,wspt_items))  
+df_f$max_f <-apply(df_f,1,max)
+df2['max_f']= df_f['max_f']
+df2$female_check <- ifelse(df2$female_items<df2$max_f,1,0)
+aggregate(female_items~female_check,data=df2,FUN=length)
+df3 <- df2[ which(df2$female_check==0), ]
+rm(df_f)
+```
+
+#### Sum of Male items check
+
+>Sum of any of the components for male items i.e. footwear, apparel and sports should not be more than the overall sum (field: male_items). 
+
+If so, this is erroneous too --> leads to removal.
+
+```{r}
+df_m <- select(df3,c(mftw_items,mapp_items,mspt_items))  
+df_m$sum_m <-apply(df_m,1,sum)
+df3['sum_m']= df_m['sum_m']
+df3$male_sum_check <- ifelse(df3$male_items<df3$sum_m,1,0)
+aggregate(male_items~male_sum_check,data=df3,FUN=length)
+df4 <- df3[ which(df3$male_sum_check==0), ]
+rm(df_m)
+```
+
+#### Sum of female items check
+> Sum of any of the components for female items i.e. footwear, apparel and sports should not be more than the overall sum (field: female_items). 
+
+If so, this is erroneous too --> leads to removal.
+
+```{r}
+df_f <- select(df4,c(wftw_items,wapp_items,wspt_items))  
+df_f$sum_f <-apply(df_f,1,sum)
+df4['sum_f']= df_f['sum_f']
+df4$female_sum_check <- ifelse(df4$female_items<df4$sum_f,1,0)
+aggregate(female_items~female_sum_check,data=df4,FUN=length)
+df5 <- df4[ which(df4$female_sum_check==0), ]
+rm(df_f)
+```
+
+
+> The women and men accessories have been 'played with' with equal data for every row. This has to be suitably modified to make the field usable for model build.
+
+#### Re-creating men accessories field
+Using the other fields, logic: <br />
+ - If male-items=0, then male_accessories = 0 <br />
+ - Else, men accessories will be remainder of male items after subtracting apparel, footwear and sports
+ Curvy items are mostly women, they will be considered in women accessory calculation <br />
+```{r}
+df_m <- select(df5,c(mapp_items,mftw_items,mspt_items))
+df_m$sum_m1 <- apply(df_m,1,sum)
+df5['sum_m1'] <- df_m['sum_m1']
+df5$new_macc_items <- ifelse(df5$male_items==0,0,df5$male_items-df5$sum_m1)
+rm(df_m)
+```
+
+#### Re-creating women accessories field
+Using the other fields, logic: <br />
+ - If female_items is zero, the women accessories is also zero (logical) <br />
+ - Else, check the given women accessory field and compare with curvy items. Individual female items also have to add up to the overall female items. However, it does not. <br />
+ Hence, I am presented with a tradeoff. I adjust the original women accessories field in comparison with curvy items (this results in a lower tradeoff). Since I am not sure of what the problem may be  - is the original women accessories field okay? Considering that given the male accessory series has been adjusted. <br />
+ I take a subjective call and adjust them within the bounds of curvy items.This will also help me do the other checks without disturbing any other fields. <br />
+
+
+```{r}
+df5$rem_f <- df5$wacc_items-df5$curvy_items
+df5$new_wacc_items <- ifelse(df5$female_items==0,0,ifelse(df5$rem_f<0,df5$wacc_items,df5$rem_f))
+df5<-select(df5,-c(rem_f))
+```
+
+
+#### Final check and exclude
+
+FInally, I check the overall 10 individual cart items bought to be adding up to the total items. Where this is not true, the rows are removed. I am left with 1,521 observations.
+
+```{r}
+df_check <-select(df5,c(wapp_items,wftw_items,mapp_items,mftw_items,wspt_items,mspt_items,curvy_items
+                        ,sacc_items,new_macc_items,new_wacc_items))
+df_check$sum_all <- apply(df_check,1,sum)
+df5['sum_all']=df_check['sum_all']
+df6 <- df5[ which(df5$sum_all==df5$items), ]   #1521 observations 
+df6<-select(df6,-c(max_m,male_check,male_sum_check,sum_f,female_sum_check,
+                   sum_m1,sum_all,wacc_items,macc_items,max_f,sum_m))
+
+df6$perc_f<- df6$female_items/df6$items
+df6$cut_perc_f <- cut(df6$perc_f,10)
+df6$cut_male_items <- cut(df6$male_items,10)
+aggregate(female_items~cut_perc_f,data=df6,FUN=length)
+table(df6$cut_perc_f,df6$cut_male_items)   #Cross-tab evaluation
+```
+
+This last part just helps us slice the distribution of male vs female items. Since, we have to create a label which can then be used for training - I will be refraining from using too many fields to derive it as it will result in loss of Degrees of freedom. Also, I will remove the fields used to create this label from further model build due to high collinearity.
+
+The table above tells us that male orders generally are low in number when compared to percent of female orders. If we cut the data to assume any customer with more than 50% female items of the overall ordered - they can be assumed to be females. There is hardly any evidence of high number of male orders once >50% orders are female. The table dies in numbers on the right.
+
+
+
+## 1(c) Label Creation for modelling use
+
+Hence, we create the label for modelling use below. This means we have a ~8% event rate for males.
+Variable name: infer_male.
+```{r}
+df6$infer_male <- as.factor(ifelse(df6$perc_f<0.5,1,0))
+table(df6$infer_male)
+df7 <-select(df6,-c(perc_f,female_items,items,male_items,cut_male_items,
+                    cut_perc_f,female_check))
+colSums(is.na(df7))
+```
+Ensuring the missings are treated. only 1 variable has missings: coupon discount applied.
+```{r}
+df7[is.na(df7)] <- 0
+str(df7)
+```
+
+
+# *Part 2 Exploration and Feature Analysis*
+
+## 2(a) Adding New Features
+Creating new features is a critical part of ML. I create months active which is subtraction of the days since first order and last order divided by 30 to convert into months. 1 is the minimum it can go to considering first and last can be the same month potentially.
+
+Then, i create orders per month (orders_pm) using this to add flavor of engagement.
+
+```{r}
+df7$mths_active <- ((df7$days_since_first_order-df7$days_since_last_order)/30)+1
+df7$orders_pm <- df7$orders/df7$mths_active
+summary(df7$mths_active)
+summary(df7$orders_pm)
+```
+```This plot shows that while there is no significant contrast in mths_active distribution,
+orders_pm have a **definite rightward skew for women** than men. This will have interesting trends to show later in the model results.
+```{r echo=FALSE}
+xyplot(mths_active ~ orders_pm | infer_male, df7, pch= 20)
+```
+
+## 2(b) Correlation analysis
+Over the next set, I will use correlation, bivariate scatter plots and frequency distribution to select key predictors.
+```{r}
+df7_c <- df7
+```
+Taking the numeric set of predictors post conversion:
+```{r,echo=FALSE}
+df7_c$infer_male <- (as.numeric(df7_c$infer_male))-1
+```
+```{r}
+df7_c<-select_if(df7_c, is.numeric)
+```
+
+#### Customer Profile Related
+Mths_active and months_since_first_order & last order are correlated as expected.
+
+```{r}
+X<-df7_c[,c("days_since_first_order","days_since_last_order","is_newsletter_subscriber","revenue","mths_active","infer_male")]
+```
+```{r, echo=FALSE}
+ggpairs(X)
+```
+
+#### Order Logistics Related
+High correlations:
+- Returns and orders
+- Vouchers and orders
+- Returns and vouchers
+
+```{r}
+X1<-df7_c[,c("orders","orders_pm","cancels","returns","different_addresses",
+          "shipping_addresses","devices","vouchers","infer_male")]
+```
+```{r, echo=FALSE}
+ggpairs(X1)
+```
+
+#### Delivery Point Related
+- No correlations to be reported.
+
+```{r}
+X2<-df7_c[,c("work_orders","home_orders","parcelpoint_orders",
+             "other_collection_orders","infer_male")]
+```
+```{r, echo=FALSE}
+ggpairs(X2)
+```
+
+#### Payment Related
+- Redpen discount used and coupon discount applied
+- Redpen discount used and revenue
+- Coupon discount applied and revenue
+
+```{r}
+X3 <-df7_c[,c("cc_payments","paypal_payments","afterpay_payments",
+           "apple_payments","redpen_discount_used",
+           "coupon_discount_applied","average_discount_onoffer",
+           "average_discount_used","revenue","infer_male")]
+```
+```{r, echo=FALSE}
+ggpairs(X3)
+```
+
+#### Cart Related - Male (for analysis)
+- Sports accessories and unisex items (expected)
+
+```{r}
+X4 <- df7_c[,c("unisex_items","mapp_items","mftw_items","mspt_items",
+               "curvy_items","sacc_items","new_macc_items","infer_male")]
+```
+```{r, echo=FALSE}
+ggpairs(X4)
+```
+
+#### Cart Related - Female (for analysis)
+- No correlations to be reported
+```{r}
+X4_1 <- df7_c[,c("unisex_items","wapp_items","wftw_items","wspt_items","curvy_items","sacc_items","new_wacc_items","infer_male")]
+```
+```{r, echo=FALSE}
+ggpairs(X4_1)
+```
+
+##### Deep-dive on female correlations
+All correlations under control. A different view for easier comparison.
+```{r}
+M <- cor(X4_1)
+M1 <- cor(X3)
+```
+```{r, echo=FALSE}
+corrplot(M, method="color")
+```
+
+##### Deep-dive on payment related and discount coupon usage
+Doing the same grid for the most correlated sets together - payment and coupon discount themed variables.
+Notable correlation:
+-Average discount used and avg discount on offer (expected)
+```{r,echo=FALSE}
+corrplot(M1, method="color")
+```
+
+#### Browsing Behavior Related
+- No correlations to be reported
+```{r, warning=FALSE,message=FALSE}
+X5 <- df7_c[,c("msite_orders","desktop_orders","android_orders",
+               "ios_orders","other_device_orders","infer_male")]
+```
+```{r, echo=FALSE,message=FALSE,warning=FALSE}
+ggpairs(X5)
+```
+
+```{r}
+rm(X,X1,X2,X3,X4,X4_1,X5,df_check,df7_c)
+rm(M,M1)
+```
+
+## 2(c) Analysing the candidates for removal
+
+```{r}
+summary(df7[,c("wapp_items","wftw_items","sacc_items","unisex_items",
+               "coupon_discount_applied","redpen_discount_used","revenue",
+               "average_discount_onoffer","average_discount_used","returns","orders","vouchers")])
+```
+
+I recommend checking coeff of variation as well - similar to ANOVA
+```{r,warning=FALSE,message=FALSE}
+library(raster)
+cv(df7[,"wftw_items"],aszero=TRUE, na.rm = TRUE)
+cv(df7[,"wapp_items"],aszero=TRUE, na.rm = TRUE)
+cv(df7[,"sacc_items"],aszero=TRUE, na.rm = TRUE)
+cv(df7[,"unisex_items"],aszero=TRUE, na.rm = TRUE)
+cv(df7[,"coupon_discount_applied"],aszero=TRUE, na.rm = TRUE)
+cv(df7[,"redpen_discount_used"],aszero=TRUE, na.rm = TRUE)
+cv(df7[,"revenue"],aszero=TRUE, na.rm = TRUE)
+cv(df7[,"average_discount_onoffer"],aszero=TRUE, na.rm = TRUE)
+cv(df7[,"average_discount_used"],aszero=TRUE, na.rm = TRUE)
+cv(df7[,"returns"],aszero=TRUE, na.rm = TRUE)
+cv(df7[,"orders"],aszero=TRUE, na.rm = TRUE)
+cv(df7[,"vouchers"],aszero=TRUE, na.rm = TRUE)
+detach("package:raster", unload=TRUE)
+```
+
+Removing the variables:  <br />
+-- Red pen discount is not as useful,coupon discount applied a better candidate (more tangible impact)  <br />
+-- unisex & sports accessory items by definition are not used in female/male items directly (also low cardinality, need bigger sample)  <br />
+-- Women Footwear and Women Apparel are highly correlated. Keep one with higher variablity. Hence, apparel chosen.  <br />
+-- average discount on offer is not guaranteeing a customer opt-in ('applied' is a better candidate)  <br />
+-- other_device_orders doesnt have any variablity  <br />
+-- revenue is a post facto measurement of preferences, plus it frequently changes meaning model needs to re-score (potentially every few weeks)  <br />
+-- other_collection_orders is not useful in measuring preferences (other is a remainder of other categories)  <br />
+-- days since first order is too far out, a recent measure is preferred. Months active is a better fit.  <br />
+
+```{r}
+md_base <- subset(df7,select= -c(wftw_items,customer_id,unisex_items,
+                                 average_discount_onoffer,redpen_discount_used,
+                        revenue,other_device_orders,orders,other_collection_orders,
+                                 days_since_first_order))
+```
+
+
+# *Part 3 Modelling Dataset*
+>Traditional 70-30 split done for modelling use. Ideally, if the sample size was more - i would like to have created a separate evaluation for cross validation in the scheme (70-15-15).
+Cross validation for now, is done within the modelling dataset by repeated sampling with replacement.
+
+```{r, message=FALSE}
+library(caTools)
+set.seed(217945)
+split = sample.split(md_base$infer_male, SplitRatio = 0.70)
+mod_df = subset(md_base, split == TRUE) #Modelling Data
+valid_df = subset(md_base, split == FALSE)  #Holdout validation sample
+```
+
+Checking the population splits: male vs female labels
+Response rates hover around 8-9%.
+```{r}
+table(mod_df$infer_male)
+table(valid_df$infer_male)
+detach("package:caTools", unload=TRUE)
+```
+
+# *Part 4: Variable Selection*
+> I split the variable selection into two parts  - Collinearity checks further based on linear regression output and then using logistic regression to keep only the significant variables for ML methods.
+ML methods are extremely sensitive to number of predictors thrown in and there needs to be thoughtful caution in selecting the right predictors that combine business sense with statistical drive.
+
+
+## 4(a): Linear Regression and VIF measures (collinearity)
+Categorical label is converted to numeric for this piece.
+```{r,message=FALSE}
+library(car)
+mod_df_lm <- mod_df
+mod_df_lm$infer_male <- as.numeric(mod_df_lm$infer_male)
+lin.reg <- lm(formula = infer_male ~ ., data = mod_df_lm)
+summary(lin.reg)
+vif(lin.reg)
+rm(mod_df_lm)
+```
+
+VIF analysis shows the following variables:
+- Returns, vouchers
+- Women apparel
+- Msite orders, desktop orders, android orders, ios orders, home_orders
+- coupon discount applied
+
+in addition, some of the variables like paypal_payments and cancels are way too insignificant.
+
+Removing the variables from the modelling and holdout as a result of VIF analysis (1 out of the pair of 2):
+After this, another round of VIFs are run:
+
+```{r}
+mod_df <- select(mod_df,-c(vouchers,wapp_items,desktop_orders,home_orders,paypal_payments,cancels))
+mod_df_lm <- mod_df
+mod_df_lm$infer_male <- as.numeric(mod_df_lm$infer_male)
+lin.reg1 <- lm(formula = infer_male ~ ., data = mod_df_lm)
+summary(lin.reg1)
+vif(lin.reg1)
+```
+
+Now, all VIFs are in control.
+Correlations are checked again below to be sure. Nothing to be reported there.
+
+
+```{r}
+M1 <- cor(subset(mod_df_lm,select= c(coupon_discount_applied,average_discount_used,
+                                    shipping_addresses,infer_male)))
+corrplot(M1, method="color")
+
+rm(mod_df_lm,M1)
+```
+
+```{r,message=FALSE}
+detach("package:car", unload=TRUE)
+```
+
+we can remove highly insignificant variables:
+-- Different addresses
+-- Apple payments
+-- Wspt items
+-- Curvy items
+
+```{r}
+mod_df <- select(mod_df,-c(different_addresses,apple_payments,wspt_items,curvy_items))
+```
+
+
+## 4(b): Logistic for Var Selection continued...
+
+Now, we use a quick diagnostic model to remove variables which might have a directional effect (captured in linear regression) but, do not help in creating decision boundaries.
+Hence, stepwise forward model would be suited to capture best predictors for advancing to ML methods.
+
+```{r,message=FALSE,warning=FALSE}
+library(MASS)
+null <- glm(infer_male ~ 0, family = binomial(link = "logit"), mod_df) #Null Model
+full <- glm(infer_male ~ ., family = binomial(link = "logit"), mod_df) #Full Model
+aic_steps <- step(null, scope=list(lower=null, upper=full), direction="forward", k=2,trace=FALSE)
+summary(aic_steps)  #Stepwise summary
+
+detach("package:MASS", unload=TRUE)
+```
+
+>Keeping  the most important variables for machine learning methods is the key here.
+This table can be interpreted in so many different ways. Men vs women trends come out well and we can attribute shopping behaviors to each class.
+
+> Men generally have lower number of devices (insignificant by itself) but, this is coupled by low number of msite orders and even lower iOS orders. Hence, they can be thought of as tied to desktop devices - they like look and feel of the product.
+Men are also less price conscious (low average discount used) and low item level coupon discounts. 
+They return items lesser and buy male items in higher numbers.
+Most significant item after apprarel is footwear. This is expected since footwear is sensitive to fit, sizes, shapes and other considerations. People buy for themselves usually and hence, it can be a good feature to predict gender.
+
+Hence, only the select features will be deployed for ML use.
+
+```{r}
+mod_df_copy <- select(mod_df,c(devices,mftw_items,mapp_items,returns,new_wacc_items,
+                                   new_macc_items,shipping_addresses,orders_pm,mspt_items,
+                                   msite_orders,ios_orders,coupon_discount_applied,
+                                   is_newsletter_subscriber,average_discount_used,infer_male))
+```
+
+
+# *Part 5: Advanced Machine Learning Model Build*
+
+## 5(a): Foundations: Single Decision Tree
+As a cursory check, I build a quick decision tree to check fit. I get close to 70% accuracy (1-rel error)
+
+```{r,message=FALSE,warning=FALSE}
+dt <- rpart(infer_male~.,data=mod_df_copy,method="class",control=rpart.control(minsplit=5,minbucket=5,maxdepth=9))
+#summary(dt)
+printcp(dt) # display the results 
+```
+
+
+## 5(b): Improvisation: Random Forest (with H2o Java API Tuning)
+
+
+#### H2o for RF Tuning
+
+>HyperParameter Tuning
+
+The following code invokes H2o API - currently commented out for Rmarkdown rendering.
+64 bit Java installation on desktop is the key requirement for opening up server hub for on the fly computation. This will help tune the RF algorithm without bias and help reduce error variance.
+
+It is currently commented out for markdown rendering, but can be opened up.
+```{r,message=FALSE,warning=FALSE}
+#library(h2o)
+#set.seed(217945)
+#h2o.init(max_mem_size = "5g")
+
+#train.h2o <- as.h2o(mod_df_copy)    #H2o object for training
+
+
+#hyper_grid.h2o <- list(
+#  ntrees      = seq(50, 300, by = 20),
+#  mtries      = seq(2, 8, by = 1),
+# max_depth   = seq(2, 8, by = 1)
+#)
+
+#search_criteria <- list(
+#  strategy = "RandomDiscrete",
+#  stopping_metric = "misclassification",
+#  stopping_tolerance = 0.005,
+#  stopping_rounds = 5,
+#  max_runtime_secs = 30*60
+#)
+
+#random_grid <- h2o.grid(
+#  algorithm = "randomForest",
+#  grid_id = "rf_grid2",
+#  x = features, 
+#  y = "infer_male", 
+#  training_frame = train.h2o,
+#  hyper_params = hyper_grid.h2o,
+#  search_criteria = search_criteria
+#)
+
+#grid_perf2 <- h2o.getGrid(
+#  grid_id = "rf_grid2", 
+#  sort_by = "mse", 
+#  decreasing = TRUE
+#)
+#print(grid_perf2)   #Printing the optimised list 
+
+#h2o.shutdown(prompt=FALSE)
+
+```
+
+#### Optimised RF Tree Run for prediction
+Bootstrap aggregating random forest trees will combine a large collection of de-correlated trees to vote the final outcome as a majority of all the tree outcomes.
+This will be a key technique to test here.
+With parameter tuning, Split-variable randomization also occurs. Only 4 of the variables are tried at once out of the overall set(14) with max-depth = 8. The trees are designed to be deep.
+
+out-of-bag (OOB) sample that provides an efficient and reasonable approximation of the test error.
+
+```{r}
+m1 <- randomForest(infer_male~.,data=mod_df_copy,ntree=250,mtry=4,max_depth=8)
+m1
+plot(m1)
+m1$importance
+varImpPlot(m1,type=2)
+```
+The most important variables are as expected from the earlier logistic regression. ML methods are able to tune accuracy very high as they're able to learn themselves.
+
+Populating the predictions from the optimised tree on the holdout sample.
+```{r}
+pred_rf <-predict(m1,valid_df)
+pred_rf1<-cbind(pred_rf,valid_df)
+
+confusionMatrix(pred_rf1$pred_rf,
+                pred_rf1$infer_male,
+                mode = "everything")
+rm(pred_rf)
+```
+
+The confusion matrix shows ~97% accuracy. I typically look for F1 score as it is harmonic mean of Precision and Recall.
+
+## 5(c): Further Refinement: Random Forest (with SMOTE oversampling)
+Sythetic Minority Oversampling technique (SMOTE) is another method we try and boost predictions with.
+To compare, we keep the number of features and trees constant, and then boost this with creating synthetic data points across the known labels to boost accuracy.
+
+```{r,message=FALSE,warning=FALSE}
+library("DMwR")
+```
+
+```{r}
+ctrl <- trainControl(method = "repeatedcv", 
+                     number = 10, 
+                     repeats = 10, 
+                     verboseIter = FALSE,
+                     search="grid",
+                     p=0.10,
+                     sampling = "smote")
+
+tunegrid <- expand.grid(.mtry=c(2:9))
+m2 <- caret::train(infer_male ~ .,
+                              data = mod_df_copy,
+                              method = "rf",
+                              metric = "Accuracy",
+                              tuneGrid=tunegrid,
+                              trControl = ctrl,
+                              ntree=250 # Held constant for comparing Random forest in 5(b)
+                              )
+rm(ctrl,tunegrid)
+```
+
+```{r,message=FALSE,warning=FALSE}
+m2
+m2$results
+```
+
+Generating predictions on holdout for SMOTE derived modelling estimates
+
+```{r}
+pred_rf_os <-predict(m2,valid_df)
+pred_rf_os <-cbind(pred_rf_os,valid_df)
+confusionMatrix(pred_rf_os$pred_rf_os,
+                pred_rf_os$infer_male,
+                mode = "everything")
+```
+
+> This is is an important comparison since we get slightly more male customers predicted, but increases false positives. F1 score hence goes slightly lower. We shall come back to it at a later point.
+Time for some boosting!
+
+## 5(d): Gradient Boosting: eXtreme Gradient Boosting Machines (xGBoost)
+> Technically this is a more superior technique than RF since it goes sequentially to eliminate errors.
+It has capacity to do parallel computation on a single machine. 
+XGBoost only works with numeric vectors. 
+
+Hence, we convert the feature space into a sparse matrix. Also, we store the labels separately.
+
+```{r,message=FALSE,warning=FALSE}
+library(Matrix)
+sparse_matrix <- sparse.model.matrix(infer_male ~ ., data = mod_df_copy)[,-1]
+y <- as.numeric(mod_df_copy$infer_male)-1
+```
+
+Preparing the training scheme: We shall tune the model for best results in a hyper-parameter search and then train the model.
+
+```{r,message=FALSE,warning=FALSE}
+#ctrl <- trainControl(method="cv", number=10, allowParallel = TRUE)
+```
+Next, design the parameter tuning grid - gridsearch takes a host of different parameters: the key being leaf node size, max depth, learning rate and sub sample of features (randomize the noise).
+>It has been commented out for rmarkdown rendering, but it can be placed back in.
+
+```{r}
+#xgbGrid <- expand.grid(nrounds = seq(1,10,by=1), 
+#                       max_depth = seq(2,6,by=1),
+#                       eta = c(0.1,0.2,0.3),
+#                       rate_drop = 0,
+#                       skip_drop = 0,
+#                       colsample_bytree = seq(0.3,1,by=0.1),
+#                       min_child_weight = 10,
+#                       subsample = seq(0.3,1,by=0.1),
+#                       gamma = 0.01
+#                      )
+```
+
+Invoking the gridsearch for finding the right hyper-parameters,
+
+```{r,warning=FALSE,message=FALSE}
+#xm_train <- train(sparse_matrix, 
+#                  mod_df_copy$infer_male,
+#                  method="xgbDART", 
+#                  eval_metric="error",
+#                  trControl=ctrl, 
+#                  tuneGrid = xgbGrid)
+```
+
+```{r}
+#xm_train$modelType
+#xm_train$method
+#head(xm_train$results)
+#xm_train$finalModel
+#print(xm_train$bestTune)
+```
+
+Using these results to get the estimates on the modelling dataset:
+
+```{r,message=FALSE,warning=FALSE}
+x1 <- xgboost(
+              data = sparse_matrix, 
+              label = y, 
+              max_depth = 6,
+              nfeatures=9,
+              learn_rate = 0.3,
+              sample_rate = 1,
+              nfold=10,  #dont require a separate cross validation call
+              nrounds = 9,objective = "multi:softprob",
+              "eval_metric" = "merror",
+              "num_class" = 2)
+```
+
+Checking variable importances on the fitted model:
+
+```{r}
+importance <- xgb.importance(feature_names = colnames(sparse_matrix), model = x1)
+importance
+xgb.plot.importance(importance_matrix = importance)
+```
+
+The results are sorted by gain and skew heavily towards cart behavior,shopping device and then profile related metrics.
+
+Checking prediction on the holdout data:
+
+```{r}
+valid_df_copy <- select(valid_df,c(devices,mftw_items,mapp_items,returns,new_wacc_items,
+                                   new_macc_items,shipping_addresses,orders_pm,mspt_items,
+                                   msite_orders,ios_orders,coupon_discount_applied,
+                                   is_newsletter_subscriber,average_discount_used,infer_male)) #ensuring only the relevant variables present in the dataset
+val_sparse_matrix <- sparse.model.matrix(infer_male ~ ., data = valid_df_copy)[,-1]
+pred_xg <- predict(x1, val_sparse_matrix)
+pred_xg <- matrix(pred_xg, ncol=2, byrow=TRUE)
+valid_df_copy$pred_xg<-max.col(pred_xg, ties.method = "last")-1
+
+confusionMatrix(factor(valid_df_copy$pred_xg),
+                factor(valid_df_copy$infer_male),
+                mode = "everything")
+```
+
+F1 score is very comparable to RF and RF with SMOTE.
+
+>All machine learning done, time for some performance metrics comparison:
+
+
+# *Part 6: Model Performance and Accuracy Tradeoffs on Validation/Holdout*
+
+## 5(a): Classification Errors (1-Accuracy)
+
+```{r,message=FALSE,warning=FALSE}
+library(Metrics)
+library(pROC)
+```
+
+```{r,message=FALSE,warning=FALSE}
+ce(valid_df_copy$infer_male, valid_df_copy$pred_xg)   #Xgboost
+ce(pred_rf1$infer_male, pred_rf1$pred_rf)             #Tuned Random Forest
+ce(pred_rf_os$infer_male, pred_rf_os$pred_rf_os)      #Tuned RF with Oversampling 
+detach("package:Metrics", unload=TRUE)
+```
+Classification error is higher in Xgboost - so even with similar F1, there are loopholes here.
+The RF is the most stable here.
+
+## 5(b): ROC Receiver Operating Characteristic - Gains chart
+
+```{r,echo=FALSE}
+rf_roc<-roc(as.numeric(pred_rf1$infer_male),as.numeric(pred_rf1$pred_rf))
+rf_os_roc<-roc(as.numeric(pred_rf_os$infer_male),as.numeric(pred_rf_os$pred_rf_os))
+xg_roc<-roc(as.numeric(valid_df_copy$infer_male),as.numeric(valid_df_copy$pred_xg))
+
+plot.new()
+plot(rf_roc, print.auc=TRUE)
+
+lines(xg_roc, col="red", type='b')
+text(0.4, 0.53, labels=sprintf("AUC of XG: %0.3f", auc(xg_roc)), col="red")
+
+lines(rf_os_roc, col="blue", type='b')
+text(0.4, 0.63, labels=sprintf("AUC of RF_OverSampled: %0.3f", auc(rf_os_roc)), col="blue")
+
+detach("package:pROC", unload=TRUE)
+```
+
+RF with SMOTE shines through here with higher events being captured. Hence, its not going to be an easy battle among these three champions. 
+
+Hence, which method we choose depends on how these work on a larger dataset. My personal vote given these results goes to RF as it is most stable and my money will be on the democracy - majority wins generally.
+
+Time to sign off! Cheers.
